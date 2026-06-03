@@ -1,38 +1,26 @@
-# Use this Blueprint to deploy n8n on Render as a web
-# service that uses a Postgres database to store
-# workflow data.
-#
-# This Blueprint uses free instance types (specified by
-# `plan`) for both the web service and the database. You
-# can upgrade to paid instance types at any time to
-# increase resources.
+# Pinterest → Instagram Automation
+# n8n self-hosted on Render.com (Free Tier)
+# ─────────────────────────────────────────
 
 services:
   - type: web
     plan: free
-    # This is the runtime for services that pull a prebuilt Docker image
     runtime: image
-    # You can give the service any name
     name: n8n-service
     image:
-      # Pulls the n8n image tagged as latest from Docker Hub
       url: docker.io/n8nio/n8n:latest
 
-    # All environment variables defined below are required!
-    #
-    # You can define additional environment variables as needed.
+    # Render spins down free services after 15min inactivity.
+    # n8n cron jobs will still fire IF the service is awake.
+    # Use UptimeRobot (free) to ping your URL every 5 min.
+    healthCheckPath: /healthz
+
     envVars:
-      # Generates a base64-encoded key for
-      # encrypting credentials in n8n
-      #
-      # Do not modify this value after it's generated!
-      # If you do, you'll lose access to all credentials
-      # encrypted with the previous value.
+      # ── Security ────────────────────────────────────────────────────────
       - key: N8N_ENCRYPTION_KEY
         generateValue: true
 
-      # These automatically populate connection details 
-      # for the Render Postgres database defined below
+      # ── Database (Render Postgres) ───────────────────────────────────────
       - key: DB_TYPE
         value: postgresdb
       - key: DB_POSTGRESDB_DATABASE
@@ -51,15 +39,55 @@ services:
         fromDatabase:
           name: n8n-db
           property: user
+      - key: DB_POSTGRESDB_PORT
+        value: "5432"
+      - key: DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED
+        value: "false"
+
+      # ── n8n Core Settings ────────────────────────────────────────────────
+      - key: N8N_PORT
+        value: "5678"
+      - key: N8N_PROTOCOL
+        value: https
+      - key: NODE_ENV
+        value: production
+      - key: EXECUTIONS_PROCESS
+        value: main
+      - key: N8N_HIRING_BANNER_ENABLED
+        value: "false"
+      - key: N8N_DIAGNOSTICS_ENABLED
+        value: "false"
+      - key: N8N_VERSION_NOTIFICATIONS_ENABLED
+        value: "false"
+
+      # ── Webhook URL (set this after first deploy) ────────────────────────
+      # Replace with your actual Render URL:  https://n8n-service.onrender.com
+      - key: WEBHOOK_URL
+        value: https://n8n-service.onrender.com
+      - key: N8N_EDITOR_BASE_URL
+        value: https://n8n-service.onrender.com
+
+      # ── Timezone (IST for India) ─────────────────────────────────────────
+      - key: GENERIC_TIMEZONE
+        value: Asia/Kolkata
+      - key: TZ
+        value: Asia/Kolkata
+
+      # ── Pinterest → Instagram Workflow Credentials ───────────────────────
+      # Instagram Graph API
+      - key: INSTAGRAM_ACCOUNT_ID
+        value: "967454269255245"
+      - key: INSTAGRAM_ACCESS_TOKEN
+        value: IGAANv5QAOLk1BZAFloVFNpazYwOGs1X3E2ZA1YwZA3RIQnZALazd6QTUxb2ZA1VDEzVUk1NExuS0pRd2xGSUZATTTVZAWEdNUnBIQ2VCekk4VXBxcEpDZAzlNMy1PZA2R2QS10OFBmSTdYM0E1STYxeTVVdEl1RHlWVDNBQXBiektwOXZAfUQZDZD
+
+      # Telegram
+      - key: TELEGRAM_CHAT_ID
+        value: "7446081188"
+
+      # Google Sheet ID
+      - key: GOOGLE_SHEET_ID
+        value: 15jDXVQTA7mjc9vWkF134EGWGvmvdNrzchNsjdSbN960
 
 databases:
   - name: n8n-db
     plan: free
-    # The free instance type is limited to 1 GB of disk
-    # space.
-    #
-    # If you later upgrade to a paid instance type, you can
-    # increase the disk size to any multiple of 5 GB by
-    # setting the `diskSizeGB` property.
-    #
-    # diskSizeGB: 5
