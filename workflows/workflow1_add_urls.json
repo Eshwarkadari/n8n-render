@@ -1,0 +1,159 @@
+{
+  "name": "Pinterest→Instagram | W1: Add URLs to Queue",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "add-pinterest-url",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Webhook: Receive URL",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "pinterest-queue-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nlet rawUrl = (body.url || body.pinterest_url || '').toString().trim();\n\nif (!rawUrl) {\n  throw new Error('No URL provided. Send: {\"url\": \"https://pinterest.com/pin/...\"}');\n}\n\nconst isValid = /pinterest\\.|pin\\.it/i.test(rawUrl);\nif (!isValid) throw new Error(`Not a Pinterest URL: ${rawUrl}`);\n\ntry {\n  const p = new URL(rawUrl);\n  rawUrl = p.origin + p.pathname.replace(/\\/+$/, '');\n} catch(e) {}\n\nreturn [{ json: { pinterest_url: rawUrl } }];"
+      },
+      "id": "node-validate",
+      "name": "Code: Validate URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": {
+          "__rl": true,
+          "value": "15jDXVQTA7mjc9vWkF134EGWGvmvdNrzchNsjdSbN960",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "node-read",
+      "name": "Sheets: Read All Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [680, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_GOOGLE_CRED_ID",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const incoming = $('Code: Validate URL').first().json.pinterest_url;\nconst rows = $input.all();\n\nconst isDuplicate = rows.some(r =>\n  (r.json.Pinterest_URL || '').toString().trim() === incoming\n);\n\nreturn [{ json: { pinterest_url: incoming, is_duplicate: isDuplicate } }];"
+      },
+      "id": "node-dedup",
+      "name": "Code: Check Duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "not-dup",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if",
+      "name": "IF: New URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "15jDXVQTA7mjc9vWkF134EGWGvmvdNrzchNsjdSbN960",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Pinterest_URL": "={{ $json.pinterest_url }}",
+            "Status": "PENDING"
+          }
+        },
+        "options": { "cellFormat": "USER_ENTERED" }
+      },
+      "id": "node-append",
+      "name": "Sheets: Add to Queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1340, 200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_GOOGLE_CRED_ID",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"message\": \"Added to queue\", \"url\": \"{{ $('Code: Check Duplicate').first().json.pinterest_url }}\" }",
+        "options": { "responseCode": 201 }
+      },
+      "id": "node-ok",
+      "name": "Respond: 201 Created",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": false, \"duplicate\": true, \"message\": \"URL already in queue\" }",
+        "options": { "responseCode": 409 }
+      },
+      "id": "node-dup",
+      "name": "Respond: 409 Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1340, 420]
+    }
+  ],
+  "connections": {
+    "Webhook: Receive URL":        { "main": [[{ "node": "Code: Validate URL",     "type": "main", "index": 0 }]] },
+    "Code: Validate URL":          { "main": [[{ "node": "Sheets: Read All Rows",  "type": "main", "index": 0 }]] },
+    "Sheets: Read All Rows":       { "main": [[{ "node": "Code: Check Duplicate",  "type": "main", "index": 0 }]] },
+    "Code: Check Duplicate":       { "main": [[{ "node": "IF: New URL?",           "type": "main", "index": 0 }]] },
+    "IF: New URL?":                { "main": [
+      [{ "node": "Sheets: Add to Queue",   "type": "main", "index": 0 }],
+      [{ "node": "Respond: 409 Duplicate", "type": "main", "index": 0 }]
+    ]},
+    "Sheets: Add to Queue":        { "main": [[{ "node": "Respond: 201 Created",   "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": ["pinterest", "instagram"]
+}
