@@ -1,0 +1,293 @@
+{
+  "name": "Pinterest→Instagram | W2: Daily Post 3 Pins",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 3 * * *" },
+            { "field": "cronExpression", "expression": "0 7 * * *" },
+            { "field": "cronExpression", "expression": "30 13 * * *" }
+          ]
+        }
+      },
+      "id": "cron",
+      "name": "Cron: 3x Daily (IST 8:30 / 12:30 / 19:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "documentId": {
+          "__rl": true,
+          "value": "15jDXVQTA7mjc9vWkF134EGWGvmvdNrzchNsjdSbN960",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "read-sheet",
+      "name": "Sheets: Read Queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [460, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_GOOGLE_CRED_ID",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Find the first PENDING row (FIFO order)\nconst rows = $input.all();\n\nlet pending = null;\nlet rowIndex = -1;\n\nfor (let i = 0; i < rows.length; i++) {\n  const s = (rows[i].json.Status || '').toString().trim().toUpperCase();\n  if (s === 'PENDING') {\n    pending = rows[i].json;\n    rowIndex = i + 2; // +1 for 0-index, +1 for header row\n    break;\n  }\n}\n\nif (!pending) {\n  throw new Error('QUEUE_EMPTY: No PENDING URLs. Add more via Workflow 1 webhook.');\n}\n\nreturn [{\n  json: {\n    row_number: rowIndex,\n    pinterest_url: (pending.Pinterest_URL || '').trim(),\n    status: 'PENDING'\n  }\n}];"
+      },
+      "id": "find-pending",
+      "name": "Code: Pick Next PENDING",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ──────────────────────────────────────────────────────────────────────────\n// Extract Pinterest image using 4 strategies — no API key needed\n// ──────────────────────────────────────────────────────────────────────────\nconst pinterestUrl = $input.first().json.pinterest_url;\n\nconst headers = {\n  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',\n  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',\n  'Accept-Language': 'en-US,en;q=0.9',\n  'Cache-Control': 'no-cache',\n  'Pragma': 'no-cache'\n};\n\nlet html = '';\ntry {\n  const res = await $httpRequest({\n    method: 'GET',\n    url: pinterestUrl,\n    headers,\n    followRedirects: true,\n    timeout: 20000,\n    returnFullResponse: true\n  });\n  html = res.body || '';\n} catch(e) {\n  throw new Error(`Pinterest fetch failed: ${e.message}`);\n}\n\nif (html.length < 200) {\n  throw new Error('Pinterest returned empty page — possible bot block. Try a direct /pin/ URL.');\n}\n\nlet imageUrl = null;\n\n// Strategy 1: og:image\nconst og = html.match(/<meta[^>]+property=[\"']og:image[\"'][^>]+content=[\"']([^\"']+)[\"']/i)\n           || html.match(/<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:image[\"']/i);\nif (og?.[1]) imageUrl = og[1].replace(/&amp;/g, '&');\n\n// Strategy 2: JSON-LD\nif (!imageUrl) {\n  const blocks = html.match(/<script[^>]+type=[\"']application\\/ld\\+json[\"'][^>]*>([\\s\\S]*?)<\\/script>/gi) || [];\n  for (const b of blocks) {\n    try {\n      const inner = b.match(/>([\\s\\S]*?)<\\/script>/i)?.[1];\n      if (inner) {\n        const data = JSON.parse(inner);\n        if (data.image) { imageUrl = Array.isArray(data.image) ? data.image[0] : data.image; break; }\n      }\n    } catch(e) {}\n  }\n}\n\n// Strategy 3: pinimg CDN regex\nif (!imageUrl) {\n  const m = html.match(/https:\\/\\/i\\.pinimg\\.com\\/originals\\/[a-f0-9/]+\\.(jpg|jpeg|png|webp)/i)\n          || html.match(/https:\\/\\/i\\.pinimg\\.com\\/[^\"'\\s]+\\.(jpg|jpeg|png|webp)/i);\n  if (m) imageUrl = m[0];\n}\n\n// Strategy 4: embedded app state JSON\nif (!imageUrl) {\n  const stateMatch = html.match(/window\\.__INITIAL_STATE__\\s*=\\s*(\\{[\\s\\S]+?\\});/i)\n                  || html.match(/__PWS_DATA__\\s*=\\s*(\\{[\\s\\S]+?\\});/i);\n  if (stateMatch) {\n    try {\n      const raw = JSON.stringify(JSON.parse(stateMatch[1]));\n      const m2 = raw.match(/https:\\\\/\\\\/i\\.pinimg\\.com\\\\/originals\\\\/[a-f0-9\\\\/]+\\.(jpg|jpeg|png|webp)/i);\n      if (m2) imageUrl = m2[0].replace(/\\\\\\/g, '/');\n    } catch(e) {}\n  }\n}\n\nif (!imageUrl) throw new Error(`No image found in: ${pinterestUrl}`);\n\n// Force highest resolution\nimageUrl = imageUrl.replace(/\\/[0-9]+x[0-9]?\\//, '/originals/');\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    image_url: imageUrl\n  }\n}];"
+      },
+      "id": "extract-image",
+      "name": "Code: Extract Pinterest Image",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const caption = `🔥 Men's Fashion Inspiration\n\nUpgrade your wardrobe with timeless style and confidence.\n\n💬 Comment \"LINK\" for product links\n📌 Save this look for later\n👔 Follow @styleformenindia for daily men's fashion inspiration\n\n#mensfashion #mensstyle #outfitideas #fashion #style #menswear #streetwear #casualstyle #outfitinspiration #styleformen #fashionreels #indianmensfashion #dailyoutfit #styleinspo #fashiontips`;\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    caption\n  }\n}];"
+      },
+      "id": "caption",
+      "name": "Code: Build Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v19.0/967454269255245/media",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "image_url",    "value": "={{ $json.image_url }}" },
+            { "name": "caption",      "value": "={{ $json.caption }}" },
+            { "name": "access_token", "value": "IGAANv5QAOLk1BZAFloVFNpazYwOGs1X3E2ZA1YwZA3RIQnZALazd6QTUxb2ZA1VDEzVUk1NExuS0pRd2xGSUZATTTVZAWEdNUnBIQ2VCekk4VXBxcEpDZAzlNMy1PZA2R2QS10OFBmSTdYM0E1STYxeTVVdEl1RHlWVDNBQXBiektwOXZAfUQZDZD" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "ig-container",
+      "name": "HTTP: IG Create Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\nif (!res.id) throw new Error(`Container failed: ${JSON.stringify(res.error || res)}`);\n\n// Instagram requires a short delay before publishing\nawait new Promise(r => setTimeout(r, 8000));\n\nreturn [{\n  json: {\n    ...$('Code: Build Caption').first().json,\n    container_id: res.id\n  }\n}];"
+      },
+      "id": "wait",
+      "name": "Code: Validate & Wait 8s",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v19.0/967454269255245/media_publish",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "creation_id",  "value": "={{ $json.container_id }}" },
+            { "name": "access_token", "value": "IGAANv5QAOLk1BZAFloVFNpazYwOGs1X3E2ZA1YwZA3RIQnZALazd6QTUxb2ZA1VDEzVUk1NExuS0pRd2xGSUZATTTVZAWEdNUnBIQ2VCekk4VXBxcEpDZAzlNMy1PZA2R2QS10OFBmSTdYM0E1STYxeTVVdEl1RHlWVDNBQXBiektwOXZAfUQZDZD" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "ig-publish",
+      "name": "HTTP: IG Publish Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const pub = $input.first().json;\nif (!pub.id) throw new Error(`Publish failed: ${JSON.stringify(pub.error || pub)}`);\n\nconst prev = $('Code: Validate & Wait 8s').first().json;\nconst postedDate = new Date().toISOString().replace('T',' ').slice(0,19);\n\nreturn [{\n  json: {\n    row_number:       prev.row_number,\n    pinterest_url:    prev.pinterest_url,\n    instagram_post_id: pub.id,\n    posted_date:      postedDate\n  }\n}];"
+      },
+      "id": "build-update",
+      "name": "Code: Prepare Sheet Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "15jDXVQTA7mjc9vWkF134EGWGvmvdNrzchNsjdSbN960",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "POSTED"
+          }
+        },
+        "where": {
+          "values": [
+            {
+              "column": "Pinterest_URL",
+              "value": "={{ $json.pinterest_url }}"
+            }
+          ]
+        },
+        "options": { "cellFormat": "USER_ENTERED" }
+      },
+      "id": "update-posted",
+      "name": "Sheets: Mark POSTED",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [2220, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_GOOGLE_CRED_ID",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "7446081188",
+        "text": "=✅ *Posted to Instagram!*\n\n🖼 *Pinterest:*\n`{{ $('Code: Prepare Sheet Update').first().json.pinterest_url }}`\n\n📸 *Instagram Post ID:*\n`{{ $('Code: Prepare Sheet Update').first().json.instagram_post_id }}`\n\n🕐 {{ $('Code: Prepare Sheet Update').first().json.posted_date }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "tg-success",
+      "name": "Telegram: ✅ Success",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2440, 300],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_TELEGRAM_CRED_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "On Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [240, 560]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $input.first().json;\nconst node = e.execution?.lastNodeExecuted || 'Unknown';\nconst msg  = e.execution?.error?.message || e.error?.message || 'Unknown error';\nreturn [{ json: { failed_node: node, error_message: msg, time: new Date().toISOString() } }];"
+      },
+      "id": "parse-err",
+      "name": "Code: Parse Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 560]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "15jDXVQTA7mjc9vWkF134EGWGvmvdNrzchNsjdSbN960",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "FAILED"
+          }
+        },
+        "where": {
+          "values": [
+            {
+              "column": "Status",
+              "value": "PENDING"
+            }
+          ]
+        },
+        "options": { "cellFormat": "USER_ENTERED" }
+      },
+      "id": "mark-failed",
+      "name": "Sheets: Mark FAILED",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [680, 560],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_GOOGLE_CRED_ID",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "7446081188",
+        "text": "=❌ *Posting FAILED*\n\n🔴 Node: `{{ $json.failed_node }}`\n💬 Error: `{{ $json.error_message }}`\n🕐 {{ $json.time }}\n\nTo retry: change row Status back to PENDING in Google Sheet.",
+        "additionalFields": { "parse_mode": "Markdown" }
+      },
+      "id": "tg-fail",
+      "name": "Telegram: ❌ Failure",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [900, 560],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_TELEGRAM_CRED_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Cron: 3x Daily (IST 8:30 / 12:30 / 19:00)": { "main": [[{ "node": "Sheets: Read Queue",        "type": "main", "index": 0 }]] },
+    "Sheets: Read Queue":                          { "main": [[{ "node": "Code: Pick Next PENDING",   "type": "main", "index": 0 }]] },
+    "Code: Pick Next PENDING":                     { "main": [[{ "node": "Code: Extract Pinterest Image", "type": "main", "index": 0 }]] },
+    "Code: Extract Pinterest Image":               { "main": [[{ "node": "Code: Build Caption",        "type": "main", "index": 0 }]] },
+    "Code: Build Caption":                         { "main": [[{ "node": "HTTP: IG Create Container",  "type": "main", "index": 0 }]] },
+    "HTTP: IG Create Container":                   { "main": [[{ "node": "Code: Validate & Wait 8s",   "type": "main", "index": 0 }]] },
+    "Code: Validate & Wait 8s":                    { "main": [[{ "node": "HTTP: IG Publish Post",      "type": "main", "index": 0 }]] },
+    "HTTP: IG Publish Post":                       { "main": [[{ "node": "Code: Prepare Sheet Update", "type": "main", "index": 0 }]] },
+    "Code: Prepare Sheet Update":                  { "main": [[{ "node": "Sheets: Mark POSTED",        "type": "main", "index": 0 }]] },
+    "Sheets: Mark POSTED":                         { "main": [[{ "node": "Telegram: ✅ Success",       "type": "main", "index": 0 }]] },
+    "On Error":                                    { "main": [[{ "node": "Code: Parse Error",          "type": "main", "index": 0 }]] },
+    "Code: Parse Error":                           { "main": [[{ "node": "Sheets: Mark FAILED",        "type": "main", "index": 0 }]] },
+    "Sheets: Mark FAILED":                         { "main": [[{ "node": "Telegram: ❌ Failure",       "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "SET_THIS_TO_WORKFLOW_2_ID_AFTER_IMPORT"
+  },
+  "tags": ["pinterest", "instagram"]
+}
